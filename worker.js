@@ -6,18 +6,61 @@ function id(){return crypto.randomUUID()}
 function normalizeName(s){return String(s||'').trim().replace(/\s+/g,' ').toLocaleLowerCase('es')}
 function baseUrl(req){const u=new URL(req.url); return u.origin+u.pathname.replace(/\/$/,'')}
 
+async function ensureSchema(env){
+ if(!env.DB) throw new Error('Falta conectar la base de datos D1 con el nombre DB.');
+ await env.DB.batch([
+  env.DB.prepare(`CREATE TABLE IF NOT EXISTS polls (
+    id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    closes_at TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    admin_token TEXT NOT NULL
+  )`),
+  env.DB.prepare(`CREATE TABLE IF NOT EXISTS options (
+    id TEXT PRIMARY KEY,
+    poll_id TEXT NOT NULL,
+    label TEXT NOT NULL,
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    FOREIGN KEY (poll_id) REFERENCES polls(id) ON DELETE CASCADE
+  )`),
+  env.DB.prepare(`CREATE TABLE IF NOT EXISTS orders (
+    id TEXT PRIMARY KEY,
+    poll_id TEXT NOT NULL,
+    diner_name TEXT NOT NULL,
+    normalized_name TEXT NOT NULL,
+    option_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (poll_id) REFERENCES polls(id) ON DELETE CASCADE,
+    FOREIGN KEY (option_id) REFERENCES options(id) ON DELETE CASCADE,
+    UNIQUE (poll_id, normalized_name)
+  )`),
+  env.DB.prepare(`CREATE TABLE IF NOT EXISTS people (
+    normalized_name TEXT PRIMARY KEY,
+    display_name TEXT NOT NULL,
+    first_seen TEXT NOT NULL,
+    last_seen TEXT NOT NULL
+  )`),
+  env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_options_poll ON options(poll_id, sort_order)'),
+  env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_orders_poll ON orders(poll_id)'),
+  env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_orders_option ON orders(option_id)')
+ ]);
+}
+
+
 export default {
  async fetch(request, env){
   const url=new URL(request.url); const path=url.pathname;
   try{
    if(request.method==='GET' && path==='/') return html();
+   if(path.startsWith('/api/')) await ensureSchema(env);
    if(request.method==='POST' && path==='/api/polls'){
     const b=await request.json(); const title=String(b.title||'Pedido de hoy').trim().slice(0,120); const options=Array.isArray(b.options)?b.options.map(x=>String(x).trim()).filter(Boolean):[]; if(options.length<2||options.length>20)return json({error:'La encuesta debe tener entre 2 y 20 opciones.'},400); const closesAt=new Date(b.closesAt); if(!Number.isFinite(closesAt.getTime()))return json({error:'Fecha de cierre inválida.'},400); const pollId=id(), adminToken=id(), now=new Date().toISOString(); await env.DB.prepare('INSERT INTO polls (id,title,closes_at,created_at,admin_token) VALUES (?,?,?,?,?)').bind(pollId,title,closesAt.toISOString(),now,adminToken).run(); const stmt=env.DB.prepare('INSERT INTO options (id,poll_id,label,sort_order) VALUES (?,?,?,?)'); await env.DB.batch(options.map((label,i)=>stmt.bind(id(),pollId,label.slice(0,300),i))); const root=url.origin; return json({pollId,adminToken,voteUrl:root+'/?poll='+encodeURIComponent(pollId),adminUrl:root+'/?poll='+encodeURIComponent(pollId)+'&admin='+encodeURIComponent(adminToken)});
    }
    const m=path.match(/^\/api\/polls\/([^/]+)$/);
-   if(request.method==='GET' && m){const p=await env.DB.prepare('SELECT id,title,closes_at FROM polls WHERE id=?').bind(m[1]).first(); if(!p)return json({error:'Encuesta no encontrada.'},404); const o=await env.DB.prepare('SELECT id,label FROM options WHERE poll_id=? ORDER BY sort_order').bind(m[1]).all(); const n=await env.DB.prepare('SELECT diner_name, MIN(created_at) first_at FROM orders WHERE poll_id=? GROUP BY normalized_name,diner_name ORDER BY first_at').bind(m[1]).all(); const closed=Date.now()>=new Date(p.closes_at).getTime(); return json({id:p.id,title:p.title,closesAt:p.closes_at,closed,options:o.results||[],knownNames:(n.results||[]).map(x=>x.diner_name)});}
+   if(request.method==='GET' && m){const p=await env.DB.prepare('SELECT id,title,closes_at FROM polls WHERE id=?').bind(m[1]).first(); if(!p)return json({error:'Encuesta no encontrada.'},404); const o=await env.DB.prepare('SELECT id,label FROM options WHERE poll_id=? ORDER BY sort_order').bind(m[1]).all(); const n=await env.DB.prepare('SELECT display_name FROM people ORDER BY last_seen DESC, display_name LIMIT 250').all(); const closed=Date.now()>=new Date(p.closes_at).getTime(); return json({id:p.id,title:p.title,closesAt:p.closes_at,closed,options:o.results||[],knownNames:(n.results||[]).map(x=>x.display_name)});}
    const vm=path.match(/^\/api\/polls\/([^/]+)\/vote$/);
-   if(request.method==='POST' && vm){const p=await env.DB.prepare('SELECT closes_at FROM polls WHERE id=?').bind(vm[1]).first(); if(!p)return json({error:'Encuesta no encontrada.'},404); if(Date.now()>=new Date(p.closes_at).getTime())return json({error:'La encuesta ya cerró.'},409); const b=await request.json(); const entries=Array.isArray(b.entries)?b.entries:[]; if(!entries.length||entries.length>12)return json({error:'Pedido inválido.'},400); const validOpts=await env.DB.prepare('SELECT id FROM options WHERE poll_id=?').bind(vm[1]).all(); const valid=new Set((validOpts.results||[]).map(x=>x.id)); const now=new Date().toISOString(); const stmts=[]; const seen=new Set(); for(const e of entries){const name=String(e.name||'').trim().replace(/\s+/g,' ').slice(0,100); const norm=normalizeName(name); if(!name||!valid.has(e.optionId))return json({error:'Falta nombre o comida.'},400); if(seen.has(norm))return json({error:'Hay un nombre repetido en el pedido.'},400); seen.add(norm); stmts.push(env.DB.prepare(`INSERT INTO orders (id,poll_id,diner_name,normalized_name,option_id,created_at,updated_at) VALUES (?,?,?,?,?,?,?) ON CONFLICT(poll_id,normalized_name) DO UPDATE SET diner_name=excluded.diner_name, option_id=excluded.option_id, updated_at=excluded.updated_at`).bind(id(),vm[1],name,norm,e.optionId,now,now)); } await env.DB.batch(stmts); return json({ok:true});}
+   if(request.method==='POST' && vm){const p=await env.DB.prepare('SELECT closes_at FROM polls WHERE id=?').bind(vm[1]).first(); if(!p)return json({error:'Encuesta no encontrada.'},404); if(Date.now()>=new Date(p.closes_at).getTime())return json({error:'La encuesta ya cerró.'},409); const b=await request.json(); const entries=Array.isArray(b.entries)?b.entries:[]; if(!entries.length||entries.length>12)return json({error:'Pedido inválido.'},400); const validOpts=await env.DB.prepare('SELECT id FROM options WHERE poll_id=?').bind(vm[1]).all(); const valid=new Set((validOpts.results||[]).map(x=>x.id)); const now=new Date().toISOString(); const stmts=[]; const seen=new Set(); for(const e of entries){const name=String(e.name||'').trim().replace(/\s+/g,' ').slice(0,100); const norm=normalizeName(name); if(!name||!valid.has(e.optionId))return json({error:'Falta nombre o comida.'},400); if(seen.has(norm))return json({error:'Hay un nombre repetido en el pedido.'},400); seen.add(norm); stmts.push(env.DB.prepare(`INSERT INTO orders (id,poll_id,diner_name,normalized_name,option_id,created_at,updated_at) VALUES (?,?,?,?,?,?,?) ON CONFLICT(poll_id,normalized_name) DO UPDATE SET diner_name=excluded.diner_name, option_id=excluded.option_id, updated_at=excluded.updated_at`).bind(id(),vm[1],name,norm,e.optionId,now,now)); stmts.push(env.DB.prepare(`INSERT INTO people (normalized_name,display_name,first_seen,last_seen) VALUES (?,?,?,?) ON CONFLICT(normalized_name) DO UPDATE SET display_name=excluded.display_name, last_seen=excluded.last_seen`).bind(norm,name,now,now)); } await env.DB.batch(stmts); return json({ok:true});}
    const rm=path.match(/^\/api\/polls\/([^/]+)\/results$/);
    if(request.method==='GET' && rm){const token=request.headers.get('X-Admin-Token')||''; const p=await env.DB.prepare('SELECT id,title,closes_at,admin_token FROM polls WHERE id=?').bind(rm[1]).first(); if(!p)return json({error:'Encuesta no encontrada.'},404); if(token!==p.admin_token)return json({error:'Acceso de administrador inválido.'},403); const counts=await env.DB.prepare(`SELECT o.label, COUNT(r.id) count FROM options o LEFT JOIN orders r ON r.option_id=o.id WHERE o.poll_id=? GROUP BY o.id,o.label,o.sort_order ORDER BY o.sort_order`).bind(rm[1]).all(); const names=await env.DB.prepare('SELECT diner_name, MIN(created_at) first_at FROM orders WHERE poll_id=? GROUP BY normalized_name,diner_name ORDER BY first_at').bind(rm[1]).all(); const cs=(counts.results||[]).map(x=>({label:x.label,count:Number(x.count||0)})); return json({title:p.title,closesAt:p.closes_at,closed:Date.now()>=new Date(p.closes_at).getTime(),counts:cs,total:cs.reduce((a,x)=>a+x.count,0),names:(names.results||[]).map(x=>x.diner_name)});}
    return json({error:'No encontrado'},404);

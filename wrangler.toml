@@ -4,5 +4,3 @@ compatibility_date = "2026-09-24"
 
 [[d1_databases]]
 binding = "DB"
-database_name = "pedido-comidas-db"
-database_id = "REEMPLAZAR_CON_TU_DATABASE_ID"
