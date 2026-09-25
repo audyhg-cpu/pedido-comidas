@@ -1,10 +1,23 @@
-# Pedido de comidas
+# Pedido de comidas v2
 
-Aplicación compartida para organizar el pedido diario de comida.
+Versión nueva y aislada de la app de pedidos de comida.
 
-- Una persona puede pedir para sí y para otro compañero.
-- Cada pedido suma al menú elegido y a “Come hoy”.
-- Los nombres de las opciones se muestran completos.
-- Los nombres de los comensales quedan disponibles para días siguientes.
-- El resumen se comparte por WhatsApp sin número fijo.
-- La base D1 se crea y las tablas se inicializan automáticamente al desplegar con Wrangler 4.45+.
+## Incluye
+- Pegado del mensaje completo y detección asistida de comidas.
+- Revisión manual de opciones antes de crear la encuesta.
+- Nombres de menú completos, sin recortes.
+- Pedido propio + pedidos para otros compañeros.
+- Resumen por opción, total de comidas y lista “Come hoy”.
+- Envío directo por WhatsApp sin número fijo.
+- Persistencia de nombres usados.
+
+## Publicación
+Cloudflare Workers + D1.
+
+Comando de despliegue:
+
+```bash
+npx wrangler deploy
+```
+
+Esta versión usa tablas `v2_*`, por lo que no mezcla los datos de prueba de la versión anterior.
